@@ -1,0 +1,17 @@
+# LLM agent framework (official OpenAI library)
+openai-agents==0.17.4
+
+# Free stock quotes and news (no signup, no API key needed)
+yfinance==1.4.0
+
+# Read .env files (keep API keys out of source code)
+python-dotenv==1.2.2
+
+# Pretty terminal output (for the CLI mode)
+rich==15.0.0
+
+# Web UI (used by app.py, also what we deploy to Streamlit Cloud)
+streamlit==1.57.0
+
+# Unit testing
+pytest==9.0.3
