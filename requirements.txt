@@ -1,5 +1,12 @@
-# LLM agent framework (official OpenAI library)
+# LLM agent framework (official OpenAI library) — used by the single-agent mode (src.agent)
 openai-agents==0.17.4
+
+# LangGraph multi-agent stack — used by the multi-agent mode (src.graph)
+# Pinned to a known-good 0.2.x / 0.3.x range; bump cautiously.
+langgraph>=0.2.50,<0.4
+langchain>=0.3.10,<0.4
+langchain-openai>=0.2.10,<0.4
+langchain-core>=0.3.20,<0.4
 
 # Free stock quotes and news (no signup, no API key needed)
 yfinance==1.4.0

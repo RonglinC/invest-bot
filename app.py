@@ -67,6 +67,20 @@ with st.sidebar:
         help="gpt-4o-mini is the cheapest and fastest; great for learning.",
     )
 
+    st.subheader("Agent mode")
+    agent_mode = st.radio(
+        "Which orchestration?",
+        options=["Single agent (openai-agents)", "Multi-agent (LangGraph)"],
+        index=1,
+        help=(
+            "Single agent = one LLM with all tools.\n\n"
+            "Multi-agent = a supervisor routes between researcher, "
+            "portfolio analyst, risk officer, and trader -- each with its own "
+            "focused tool subset."
+        ),
+    )
+    is_multi = agent_mode.startswith("Multi")
+
     st.divider()
 
     st.subheader("💰 My account")
@@ -101,6 +115,7 @@ with st.sidebar:
     if st.button("🔄 Reset account (start over)", use_container_width=True):
         state_mod.reset_portfolio()
         st.session_state.pop("messages", None)
+        st.session_state.pop("graph_messages", None)
         st.rerun()
 
     st.caption(
@@ -117,48 +132,125 @@ if not api_key:
     st.info("👈 Enter your OpenAI API key in the sidebar to start.", icon="ℹ️")
     st.stop()
 
-# Build the agent. @st.cache_resource keeps the same (key, model) cached so we
-# don't rebuild on every rerun.
+# ---- Build whichever orchestrator the user chose ----
+# @st.cache_resource keys on (key, model, is_multi) so switching modes returns
+# a freshly built object (the user expects an immediate switch).
 from agents import Runner
+from langchain_core.messages import AIMessage, HumanMessage
+
 from src.agent import build_agent
+from src.graph import build_graph
 
 
 @st.cache_resource(show_spinner=False)
-def get_agent(_key: str, _model: str):
+def get_single_agent(_key: str, _model: str):
     return build_agent(build_settings(_key, _model))
 
 
+@st.cache_resource(show_spinner=False)
+def get_multi_graph(_key: str, _model: str):
+    return build_graph(build_settings(_key, _model))
+
+
 try:
-    agent = get_agent(api_key, model)
+    if is_multi:
+        graph = get_multi_graph(api_key, model)
+    else:
+        agent = get_single_agent(api_key, model)
 except ValueError as e:
     st.error(f"Config error: {e}")
     st.stop()
 
 
-# Message history
+# ---- Message history ----
+# We store messages in a uniform shape: {"role": "user"|"assistant", "content", "name"?}.
+# The optional "name" lets us label *which* agent spoke (e.g. researcher, risk_officer).
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
-        {"role": "assistant", "content": "Hi, I'm invest-bot. Ask about your account, quotes, news, or tell me to place a simulated order."}
+        {
+            "role": "assistant",
+            "content": (
+                "Hi, I'm invest-bot. Ask about your account, quotes, news, or tell me "
+                "to place a simulated order."
+            ),
+        }
     ]
 
-for msg in st.session_state["messages"]:
+# Keep an in-memory LangGraph message list parallel to the UI list, so
+# multi-agent conversations can carry context across turns.
+if "graph_messages" not in st.session_state:
+    st.session_state["graph_messages"] = []
+
+
+def _render_message(msg: dict) -> None:
+    """Render one stored message, with an agent-name badge when present."""
     with st.chat_message(msg["role"]):
+        name = msg.get("name")
+        if name:
+            badge_colors = {
+                "supervisor": "#eab308",
+                "researcher": "#06b6d4",
+                "portfolio_analyst": "#3b82f6",
+                "risk_officer": "#ef4444",
+                "trader": "#a855f7",
+            }
+            color = badge_colors.get(name, "#6b7280")
+            st.markdown(
+                f"<span style='background:{color};color:white;padding:2px 8px;"
+                f"border-radius:6px;font-size:0.75em;font-weight:600'>{name}</span>",
+                unsafe_allow_html=True,
+            )
         st.markdown(msg["content"])
 
-# Input box
+
+for msg in st.session_state["messages"]:
+    _render_message(msg)
+
+
+# ---- Input box ----
 if user_input := st.chat_input("Talk to the bot… (e.g. 'What's AAPL right now?')"):
     st.session_state["messages"].append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    with st.chat_message("assistant"):
-        with st.spinner("Agent thinking + calling tools…"):
-            try:
-                result = Runner.run_sync(agent, user_input)
-                answer = result.final_output
-            except Exception as e:
-                answer = f"❌ Error: `{type(e).__name__}`: {e}"
-        st.markdown(answer)
+    if is_multi:
+        # Multi-agent: stream node-by-node and render each agent's reply with a badge.
+        st.session_state["graph_messages"].append(HumanMessage(content=user_input))
+        try:
+            with st.spinner("Supervisor + specialists working…"):
+                final_messages: list = []
+                for event in graph.stream(
+                    {"messages": st.session_state["graph_messages"]},
+                    config={"recursion_limit": 25},
+                    stream_mode="updates",
+                ):
+                    for node_name, delta in event.items():
+                        if not isinstance(delta, dict):
+                            continue
+                        for m in delta.get("messages", []):
+                            text = getattr(m, "content", "") or ""
+                            if not text:
+                                continue
+                            stored = {"role": "assistant", "content": text, "name": node_name}
+                            st.session_state["messages"].append(stored)
+                            _render_message(stored)
+                            if isinstance(m, AIMessage):
+                                final_messages.append(m)
+                st.session_state["graph_messages"].extend(final_messages)
+        except Exception as e:
+            err = f"❌ Error: `{type(e).__name__}`: {e}"
+            st.session_state["messages"].append({"role": "assistant", "content": err})
+            _render_message({"role": "assistant", "content": err})
+    else:
+        # Single-agent: classic one-shot call to openai-agents Runner.
+        with st.chat_message("assistant"):
+            with st.spinner("Agent thinking + calling tools…"):
+                try:
+                    result = Runner.run_sync(agent, user_input)
+                    answer = result.final_output
+                except Exception as e:
+                    answer = f"❌ Error: `{type(e).__name__}`: {e}"
+            st.markdown(answer)
+        st.session_state["messages"].append({"role": "assistant", "content": answer})
 
-    st.session_state["messages"].append({"role": "assistant", "content": answer})
     st.rerun()  # Trigger one more rerun so the sidebar account summary refreshes

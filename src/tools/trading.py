@@ -27,6 +27,59 @@ from src.tools.portfolio import get_account
 from src.tools.risk import check_order
 
 
+def preview_market_order(symbol: str, side: str, qty: float) -> dict[str, Any]:
+    """Dry-run a market order: run the same quote + risk checks, but DO NOT touch the account.
+
+    Returns:
+        {
+          "would_fill": bool,
+          "reason": "<short explanation, OK on success, rejection text on failure>",
+          "symbol": "AAPL",
+          "side": "buy",
+          "qty": 5,
+          "estimated_fill_price": 189.12,
+          "estimated_value": 945.60
+        }
+
+    Use this from the Risk Officer agent (or any callsite) when you want to know
+    "would this order be allowed?" without actually placing it.
+    """
+    symbol = symbol.upper().strip()
+    side = side.lower().strip()
+
+    quote = get_quote(symbol)
+    if "error" in quote:
+        return {
+            "would_fill": False,
+            "reason": f"Cannot fetch quote for {symbol}: {quote['error']}",
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+        }
+    last_price = float(quote["price"])
+
+    account = get_account()
+    state = load_portfolio()
+    ok, reason = check_order(
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        last_price=last_price,
+        account=account,
+        todays_order_count=todays_order_count(state),
+        current_position_qty=current_position_qty(state, symbol),
+    )
+    return {
+        "would_fill": ok,
+        "reason": reason,
+        "symbol": symbol,
+        "side": side,
+        "qty": qty,
+        "estimated_fill_price": round(last_price, 4),
+        "estimated_value": round(qty * last_price, 2),
+    }
+
+
 def place_market_order(symbol: str, side: str, qty: float) -> dict[str, Any]:
     """Place a market order. `side` is 'buy' or 'sell'; `qty` is number of shares.
 

@@ -121,6 +121,105 @@ flowchart LR
 
 ---
 
+## Multi-agent mode (LangGraph)
+
+The project ships **two interchangeable orchestrations** that share the same
+tool layer and ledger:
+
+1. **Single agent** (`src/agent.py`, `openai-agents` framework) — one LLM with
+   all 7 tools. Simple, fast, the original implementation.
+2. **Multi-agent** (`src/graph/`, LangGraph) — a **supervisor** routes between
+   four focused specialists, each with its own tool subset.
+
+### Why two modes
+
+You'll see in the code that the multi-agent version isn't "better" — it's
+**different**. Read both and form your own opinion. As a rule of thumb:
+
+| Question | Single agent | Multi-agent |
+|---|---|---|
+| Latency for simple queries | Lower (1 LLM call) | Higher (supervisor + specialist = 2+ calls) |
+| Routing transparency | Hidden in one prompt | Explicit supervisor decision shown to user |
+| Hard role boundaries | Suggestion in prompt | **Enforced** by tool-set partitioning |
+| Easy to add a new domain (e.g. tax adviser) | Add tools + edit prompt | Add a new specialist + supervisor knows about it |
+| Cost per turn | Cheaper | More LLM calls = more $ |
+
+### The team
+
+```mermaid
+flowchart TD
+  Start([User]) --> Sup
+  Sup[Supervisor<br/>LLM + structured output] -.routes.-> R[Researcher<br/>quote · bars · news]
+  Sup -.routes.-> PA[Portfolio Analyst<br/>account · positions · orders]
+  Sup -.routes.-> RO[Risk Officer<br/>preview_market_order<br/>dry-run risk gate]
+  Sup -.routes.-> T[Trader<br/>place_market_order]
+  Sup -.routes.-> End([FINISH])
+  R --> Sup
+  PA --> Sup
+  RO --> Sup
+  T --> Sup
+```
+
+| Agent | Tools | Job |
+|---|---|---|
+| **supervisor** | _(none — only routes)_ | Reads conversation, picks the next specialist via structured output. |
+| **researcher** | `get_quote`, `get_bars`, `get_news` | Answers "what's the market doing?" questions. |
+| **portfolio_analyst** | `get_account`, `get_positions`, `get_orders` | Surfaces your cash, P/L, and exposure. |
+| **risk_officer** | `get_account`, `get_positions`, **`preview_market_order` (dry-run)** | Says whether a proposed trade would pass risk — **without** mutating the account. |
+| **trader** | `place_market_order` | Only used after **explicit user confirmation**. |
+
+### Run it
+
+```bash
+# Terminal CLI — verbose, you see each agent label
+python -m src.graph_cli
+
+# Print the compiled graph as a Mermaid diagram (no API call needed)
+python -m src.graph_cli --mermaid
+
+# Web UI — toggle "Multi-agent (LangGraph)" in the sidebar
+streamlit run app.py
+```
+
+Try these prompts in multi-agent mode and watch the routing badges:
+
+```
+What's AAPL right now?              # supervisor -> researcher -> FINISH
+How am I doing?                     # supervisor -> portfolio_analyst -> FINISH
+I'd like to buy 5 shares of AAPL    # supervisor -> risk_officer -> FINISH (asks you to confirm)
+yes                                 # supervisor -> trader -> FINISH
+```
+
+### Reading order for the multi-agent code
+
+| # | File | What you learn |
+|---|---|---|
+| 1 | [`src/graph/state.py`](src/graph/state.py) | LangGraph's `TypedDict` + `add_messages` reducer pattern |
+| 2 | [`src/graph/tools.py`](src/graph/tools.py) | Wrapping pure-Python tools as `@tool` for LangChain |
+| 3 | [`src/graph/agents.py`](src/graph/agents.py) | `create_react_agent` per role + persona prompts |
+| 4 | [`src/graph/supervisor.py`](src/graph/supervisor.py) | Forcing LLM routing via `with_structured_output(Pydantic)` |
+| 5 | [`src/graph/build.py`](src/graph/build.py) | `StateGraph` + `add_conditional_edges` to wire the topology |
+| 6 | [`src/graph_cli.py`](src/graph_cli.py) | `graph.stream(...)` for live agent-by-agent rendering |
+| 7 | [`tests/test_graph.py`](tests/test_graph.py) | Testing graph wiring without burning OpenAI tokens |
+
+### Exercises (multi-agent)
+
+#### Easy
+1. Lower `temperature` from `0.0` to `0.7` in `agents.py` and observe the researcher's prose change (routing stays deterministic because the supervisor still uses `0.0`).
+2. Add a one-line edit to `RESEARCHER_PROMPT` that asks for bullet points instead of paragraphs.
+
+#### Medium
+3. Add a new specialist `news_analyst` that consumes `get_news` and produces a sentiment score (-1..+1). Update `SUPERVISOR_PROMPT` to know about it. Make sure tests still pass.
+4. Track each specialist's **token usage** by intercepting `delta` in the streaming loop in `graph_cli.py`. Print a final tally.
+5. Add a `compliance_officer` specialist that has read-only access to `get_orders` and approves/rejects trades based on a "no more than 3 trades in NVDA per week" rule.
+
+#### Hard
+6. Replace the supervisor's structured-output routing with **handoffs** — each specialist itself decides whom to call next via a `transfer_to_*` tool. Compare convergence speed and reliability.
+7. Add **persistence**: pass a `MemorySaver` checkpointer to `build_graph(...).compile(checkpointer=...)` and let users resume a conversation by thread id. Useful when you redeploy and want chat history to survive.
+8. Profile end-to-end latency in single-agent vs multi-agent on the same 20 prompts. Where exactly does the extra time come from?
+
+---
+
 ## Exercises (easy → hard)
 
 Do one before peeking at the next. Stuck? Ask me.
@@ -217,8 +316,10 @@ Not recommended — easy to get drained by abuse.
 
 ```bash
 source .venv/bin/activate                                     # activate the env in a new terminal
-python -m src.main                                            # CLI agent
-streamlit run app.py                                          # Web UI agent
+python -m src.main                                            # CLI: single-agent (openai-agents)
+python -m src.graph_cli                                       # CLI: multi-agent (LangGraph)
+python -m src.graph_cli --mermaid                             # print the multi-agent graph as Mermaid
+streamlit run app.py                                          # Web UI (toggle mode in the sidebar)
 pytest -v                                                     # run tests
 python -c "from src.state import reset_portfolio; reset_portfolio(); print('reset')"  # wipe the account
 python -c "import json; from src.tools.portfolio import get_account; print(json.dumps(get_account(), indent=2))"  # print account summary
@@ -228,7 +329,8 @@ python -c "import json; from src.tools.portfolio import get_account; print(json.
 
 ## References
 
-- **openai-agents (agent framework)**: [Docs](https://openai.github.io/openai-agents-python/) · [GitHub](https://github.com/openai/openai-agents-python)
+- **openai-agents (single-agent framework)**: [Docs](https://openai.github.io/openai-agents-python/) · [GitHub](https://github.com/openai/openai-agents-python)
+- **LangGraph (multi-agent framework)**: [Docs](https://langchain-ai.github.io/langgraph/) · [GitHub](https://github.com/langchain-ai/langgraph) · [Multi-agent supervisor tutorial](https://langchain-ai.github.io/langgraph/tutorials/multi_agent/agent_supervisor/)
 - **yfinance (quote library)**: [GitHub](https://github.com/ranaroussi/yfinance)
 - **Streamlit**: [Docs](https://docs.streamlit.io/) · [Community Cloud](https://share.streamlit.io)
 - **OpenAI API pricing**: [Pricing](https://openai.com/api/pricing/) (gpt-4o-mini: $0.15/M input tokens, $0.60/M output tokens)
